@@ -21,6 +21,7 @@
 #include <video/of_videomode.h>
 #include <video/videomode.h>
 
+#include <drm/drm_bridge.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_print.h>
 
@@ -87,7 +88,7 @@
 
 #define MIC_BS_SIZE_2D(x)	((x) & 0x3fff)
 
-static char *clk_names[] = { "pclk_mic0", "sclk_rgb_vclk_to_mic0" };
+static const char *const clk_names[] = { "pclk_mic0", "sclk_rgb_vclk_to_mic0" };
 #define NUM_CLKS		ARRAY_SIZE(clk_names)
 static DEFINE_MUTEX(mic_mutex);
 
@@ -101,6 +102,7 @@ struct exynos_mic {
 	struct videomode vm;
 	struct drm_encoder *encoder;
 	struct drm_bridge bridge;
+	struct drm_bridge *next_bridge;
 
 	bool enabled;
 };
@@ -267,7 +269,7 @@ static void mic_pre_enable(struct drm_bridge *bridge)
 	if (mic->enabled)
 		goto unlock;
 
-	ret = pm_runtime_get_sync(mic->dev);
+	ret = pm_runtime_resume_and_get(mic->dev);
 	if (ret < 0)
 		goto unlock;
 
@@ -297,12 +299,22 @@ unlock:
 
 static void mic_enable(struct drm_bridge *bridge) { }
 
+static int mic_attach(struct drm_bridge *bridge,
+		      enum drm_bridge_attach_flags flags)
+{
+	struct exynos_mic *mic = bridge->driver_private;
+
+	return drm_bridge_attach(bridge->encoder, mic->next_bridge,
+				 &mic->bridge, flags);
+}
+
 static const struct drm_bridge_funcs mic_bridge_funcs = {
 	.disable = mic_disable,
 	.post_disable = mic_post_disable,
 	.mode_set = mic_mode_set,
 	.pre_enable = mic_pre_enable,
 	.enable = mic_enable,
+	.attach = mic_attach,
 };
 
 static int exynos_mic_bind(struct device *dev, struct device *master,
@@ -376,6 +388,7 @@ static int exynos_mic_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct exynos_mic *mic;
+	struct device_node *remote;
 	struct resource res;
 	int ret, i;
 
@@ -418,6 +431,16 @@ static int exynos_mic_probe(struct platform_device *pdev)
 			goto err;
 		}
 	}
+
+	remote = of_graph_get_remote_node(dev->of_node, 1, 0);
+	mic->next_bridge = of_drm_find_bridge(remote);
+	if (IS_ERR(mic->next_bridge)) {
+		DRM_DEV_ERROR(dev, "mic: Failed to find next bridge\n");
+		ret = PTR_ERR(mic->next_bridge);
+		goto err;
+	}
+
+	of_node_put(remote);
 
 	platform_set_drvdata(pdev, mic);
 
